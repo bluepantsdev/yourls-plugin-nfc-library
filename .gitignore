@@ -1,0 +1,6 @@
+.DS_Store
+# Belt-and-suspenders: this plugin folder shouldn't itself hold Yourls
+# config/secrets (yourls.cfg with the API signature token lives one
+# level up, outside this repo) -- but ignore common names just in case.
+yourls.cfg
+config.php
