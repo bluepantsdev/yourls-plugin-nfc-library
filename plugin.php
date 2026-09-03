@@ -36,9 +36,12 @@ define( 'NFCBOOKS_DEFAULT_LIBRARY_TITLE', 'Library' );
 
 yourls_add_filter( 'api_action_nfclibrary_edit', 'nfcbooks_api_action_edit' );
 function nfcbooks_api_action_edit() {
-	$keyword = isset( $_REQUEST['keyword'] ) ? yourls_sanitize_string( $_REQUEST['keyword'] ) : '';
-	$url     = isset( $_REQUEST['url'] ) ? $_REQUEST['url'] : '';
-	$title   = isset( $_REQUEST['title'] ) ? $_REQUEST['title'] : '';
+	$keyword     = isset( $_REQUEST['keyword'] ) ? yourls_sanitize_string( $_REQUEST['keyword'] ) : '';
+	$url         = isset( $_REQUEST['url'] ) ? $_REQUEST['url'] : '';
+	$title       = isset( $_REQUEST['title'] ) ? $_REQUEST['title'] : '';
+	$new_keyword = ( isset( $_REQUEST['new_keyword'] ) && $_REQUEST['new_keyword'] !== '' )
+		? yourls_sanitize_string( $_REQUEST['new_keyword'] )
+		: $keyword;
 
 	if ( $keyword === '' || $url === '' ) {
 		return array( 'status' => 'fail', 'statusCode' => 400, 'message' => 'Missing keyword or url.' );
@@ -46,8 +49,27 @@ function nfcbooks_api_action_edit() {
 	if ( yourls_get_keyword_longurl( $keyword ) === false ) {
 		return array( 'status' => 'fail', 'statusCode' => 404, 'message' => 'No link found for that keyword.' );
 	}
+	if ( $new_keyword === 'library' ) {
+		return array( 'status' => 'fail', 'statusCode' => 400, 'message' => 'The keyword "library" is reserved for the public listing page.' );
+	}
+	if ( $new_keyword !== $keyword && yourls_get_keyword_longurl( $new_keyword ) !== false ) {
+		return array( 'status' => 'fail', 'statusCode' => 409, 'message' => 'That keyword is already in use.' );
+	}
 
-	yourls_edit_link( $url, $keyword, $keyword, $title );
+	yourls_edit_link( $url, $keyword, $new_keyword, $title );
+
+	$ydb = yourls_get_db();
+
+	// Carry this book's row over to the new keyword *before* the upsert
+	// below (which is keyed by keyword) -- otherwise renaming would leave
+	// its author/cover/notes/password orphaned under the old keyword
+	// (book_tags' primary key) instead of following the link.
+	if ( $new_keyword !== $keyword ) {
+		$ydb->fetchAffected(
+			"UPDATE `" . NFCBOOKS_TABLE . "` SET keyword = :new_keyword WHERE keyword = :keyword",
+			array( 'new_keyword' => $new_keyword, 'keyword' => $keyword )
+		);
+	}
 
 	// Optional book metadata + password -- each is only written when the
 	// request explicitly includes it, so omitting a field leaves whatever
@@ -56,7 +78,7 @@ function nfcbooks_api_action_edit() {
 	// physical NFC tag, it's just remembered so the app can show it back to
 	// you later.)
 	$optional_fields = array( 'author', 'cover_url', 'notes', 'password' );
-	$provided         = array( 'keyword' => $keyword, 'title' => $title );
+	$provided         = array( 'keyword' => $new_keyword, 'title' => $title );
 	$update_clauses   = array( 'title = VALUES(title)' );
 	foreach ( $optional_fields as $field ) {
 		if ( isset( $_REQUEST[ $field ] ) ) {
@@ -68,7 +90,6 @@ function nfcbooks_api_action_edit() {
 	$columns      = array_keys( $provided );
 	$placeholders = array_map( function ( $c ) { return ':' . $c; }, $columns );
 
-	$ydb = yourls_get_db();
 	// Upsert (not plain UPDATE): links created via the iOS app go through the
 	// native "shorturl" action, which never inserts a NFCBOOKS_TABLE row, so
 	// there may be nothing here yet to update.
@@ -83,7 +104,7 @@ function nfcbooks_api_action_edit() {
 		'status'     => 'success',
 		'statusCode' => 200,
 		'message'    => 'Link updated.',
-		'keyword'    => $keyword,
+		'keyword'    => $new_keyword,
 		'url'        => $url,
 		'title'      => $title,
 	);
@@ -850,7 +871,7 @@ function nfcbooks_admin_page() {
 					<input type="hidden" name="nfcbooks_action" value="edit">
 					<input type="hidden" name="orig_keyword" value="<?php echo yourls_esc_attr( $b->keyword ); ?>">
 					<td>
-						<?php echo yourls_esc_html( $b->keyword ); ?>
+						<input type="text" name="keyword" value="<?php echo yourls_esc_attr( $b->keyword ); ?>" size="14">
 						<a href="<?php echo yourls_esc_attr( $site . '/' . $b->keyword ); ?>" target="_blank" rel="noopener" title="Open this book's page" style="margin-left:.4rem;text-decoration:none">🔗</a>
 					</td>
 					<td><input type="text" name="title" value="<?php echo yourls_esc_attr( $b->title ); ?>"></td>
@@ -904,20 +925,33 @@ function nfcbooks_handle_add() {
 }
 
 function nfcbooks_handle_edit() {
-	$keyword   = yourls_sanitize_string( $_POST['orig_keyword'] );
-	$url       = $_POST['url'];
-	$title     = $_POST['title'];
-	$author    = isset( $_POST['author'] ) ? $_POST['author'] : '';
+	$keyword     = yourls_sanitize_string( $_POST['orig_keyword'] );
+	$new_keyword = ( isset( $_POST['keyword'] ) && yourls_sanitize_string( $_POST['keyword'] ) !== '' )
+		? yourls_sanitize_string( $_POST['keyword'] )
+		: $keyword;
+	$url         = $_POST['url'];
+	$title       = $_POST['title'];
+	$author      = isset( $_POST['author'] ) ? $_POST['author'] : '';
 
-	yourls_edit_link( $url, $keyword, $keyword, $title );
+	if ( $new_keyword === 'library' ) {
+		return 'The keyword "library" is reserved for the public listing page.';
+	}
+	if ( $new_keyword !== $keyword && yourls_get_keyword_longurl( $new_keyword ) !== false ) {
+		return 'The keyword "' . yourls_esc_html( $new_keyword ) . '" is already in use.';
+	}
+
+	yourls_edit_link( $url, $keyword, $new_keyword, $title );
 
 	$ydb = yourls_get_db();
+	// Renaming moves this book's row to the new keyword (book_tags'
+	// primary key) so its author/cover/notes/password stay attached to the
+	// link instead of being orphaned under the old one.
 	$ydb->fetchAffected(
-		"UPDATE `" . NFCBOOKS_TABLE . "` SET title = :title, author = :author WHERE keyword = :keyword",
-		array( 'title' => $title, 'author' => $author, 'keyword' => $keyword )
+		"UPDATE `" . NFCBOOKS_TABLE . "` SET keyword = :new_keyword, title = :title, author = :author WHERE keyword = :keyword",
+		array( 'new_keyword' => $new_keyword, 'title' => $title, 'author' => $author, 'keyword' => $keyword )
 	);
 
-	return 'Saved "' . yourls_esc_html( $title ) . '".';
+	return 'Saved "' . yourls_esc_html( $title ) . '"' . ( $new_keyword !== $keyword ? ' (renamed to "' . yourls_esc_html( $new_keyword ) . '")' : '' ) . '.';
 }
 
 function nfcbooks_handle_delete() {
