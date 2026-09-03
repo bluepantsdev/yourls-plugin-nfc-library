@@ -3,14 +3,14 @@
 Plugin Name: NFC Library
 Plugin URI: https://sund.link/
 Description: Adds a public /library page listing NFC-tagged books, and an admin page to create/edit/delete them. Each book is backed by a normal Yourls short link, so it also works as a plain redirect target.
-Version: 0.5.0
+Version: 0.5.1
 Author: Shaun
 Author URI:
 */
 
 if ( !defined( 'YOURLS_ABSPATH' ) ) die();
 
-define( 'NFCBOOKS_VERSION', '0.5.0' );
+define( 'NFCBOOKS_VERSION', '0.5.1' );
 define( 'NFCBOOKS_TABLE', YOURLS_DB_PREFIX . 'book_tags' );
 define( 'NFCBOOKS_NONCE', 'nfcbooks-manage' );
 define( 'NFCBOOKS_LANGUAGE_OPTION', 'nfcbooks_language' );

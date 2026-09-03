@@ -2,7 +2,7 @@
 
 Adds a public `/library` page and an admin **Library** management page to a Yourls install. Built for the NFC Tags iOS app project.
 
-Current version: **0.5.0** (shown next to the "Library" heading on the admin page).
+Current version: **0.5.1** (shown next to the "Library" heading on the admin page).
 
 ## What it does
 
@@ -34,7 +34,7 @@ Stock Yourls' API only supports creating links (`shorturl`) and reading them (`s
 - `action=nfclibrary_edit` -- params `keyword` (required), `url` (required), `title` (optional), plus optional book metadata: `author`, `cover_url`, `notes`, `password`. Updates the link's destination/title, and upserts whichever optional fields are present in the request -- an omitted field is left untouched (not blanked out), so partial updates are safe.
 - `action=nfclibrary_delete` -- params `keyword` (required). Deletes the link and its metadata row.
 - `action=nfclibrary_meta` -- no params. Bulk-returns this plugin's per-keyword metadata as `{"meta": {"<keyword>": {"author", "cover_url", "notes", "password"}, ...}}`, since none of that lives in Yourls' own link data. The app calls this once per link-list refresh (not once per link) and merges it into the native `stats` response.
-- `action=nfclibrary_status` -- no params. Returns `{"version": "0.5.0", ...}` so the app's Settings > NFC Library Plugin screen can confirm this plugin is installed/active and check its version, without that check depending on any of the other actions actually succeeding.
+- `action=nfclibrary_status` -- no params. Returns `{"version": "0.5.1", ...}` so the app's Settings > NFC Library Plugin screen can confirm this plugin is installed/active and check its version, without that check depending on any of the other actions actually succeeding.
 
 All four return the usual `{"status": "success"|"fail", ...}` shape (`nfclibrary_meta` also includes `meta`, `nfclibrary_status` also includes `version`). Creating links from the app still uses Yourls' native `action=shorturl`, followed by an `nfclibrary_edit` call to attach any metadata the app collected (author/cover/notes/password) -- native `shorturl` has no way to carry those itself. Listing links uses `action=stats` merged with `action=nfclibrary_meta`.
 
