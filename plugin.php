@@ -3,14 +3,16 @@
 Plugin Name: NFC Library
 Plugin URI: https://sund.link/
 Description: Adds a public /library page listing NFC-tagged books, and an admin page to create/edit/delete them. Each book is backed by a normal Yourls short link, so it also works as a plain redirect target.
-Version: 0.5.1
+Version: 0.5.2
 Author: Shaun
 Author URI:
 */
 
 if ( !defined( 'YOURLS_ABSPATH' ) ) die();
 
-define( 'NFCBOOKS_VERSION', '0.5.1' );
+define( 'NFCBOOKS_VERSION', '0.5.2' );
+define( 'NFCBOOKS_PASSWORD_ENCRYPT_OPTION', 'nfcbooks_password_encrypt_migrated' );
+define( 'NFCBOOKS_PASSWORD_ENC_PREFIX', 'nfcenc1:' );
 define( 'NFCBOOKS_TABLE', YOURLS_DB_PREFIX . 'book_tags' );
 define( 'NFCBOOKS_NONCE', 'nfcbooks-manage' );
 define( 'NFCBOOKS_LANGUAGE_OPTION', 'nfcbooks_language' );
@@ -82,8 +84,12 @@ function nfcbooks_api_action_edit() {
 	$update_clauses   = array( 'title = VALUES(title)' );
 	foreach ( $optional_fields as $field ) {
 		if ( isset( $_REQUEST[ $field ] ) ) {
-			$provided[ $field ]  = $_REQUEST[ $field ];
-			$update_clauses[]    = "`$field` = VALUES(`$field`)";
+			if ( $field === 'password' ) {
+				$provided[ $field ] = nfcbooks_prepare_stored_password( $_REQUEST[ $field ] );
+			} else {
+				$provided[ $field ] = $_REQUEST[ $field ];
+			}
+			$update_clauses[] = "`$field` = VALUES(`$field`)";
 		}
 	}
 
@@ -141,17 +147,21 @@ yourls_add_filter( 'api_action_nfclibrary_meta', 'nfcbooks_api_action_meta' );
 function nfcbooks_api_action_meta() {
 	// Bulk-fetch this plugin's per-keyword metadata (author, cover, notes,
 	// password) so the app can merge it into the native "stats" action's
-	// results without one API round-trip per link.
+	// results without one API round-trip per link. Passwords are encrypted at
+	// rest but returned decrypted here (API signature auth required).
 	$ydb  = yourls_get_db();
 	$rows = $ydb->fetchObjects( "SELECT keyword, author, cover_url, notes, password FROM `" . NFCBOOKS_TABLE . "`" );
 
 	$meta = array();
 	foreach ( $rows as $row ) {
+		$stored   = (string) $row->password;
+		$password = nfcbooks_password_for_api( $stored );
 		$meta[ $row->keyword ] = array(
-			'author'    => (string) $row->author,
-			'cover_url' => (string) $row->cover_url,
-			'notes'     => (string) $row->notes,
-			'password'  => (string) $row->password,
+			'author'       => (string) $row->author,
+			'cover_url'    => (string) $row->cover_url,
+			'notes'        => (string) $row->notes,
+			'password'     => $password,
+			'has_password' => ( $stored !== '' ),
 		);
 	}
 
@@ -298,12 +308,14 @@ function nfcbooks_maybe_create_table() {
 			`author` VARCHAR(255) NOT NULL DEFAULT '',
 			`cover_url` VARCHAR(500) NOT NULL DEFAULT '',
 			`notes` TEXT NULL,
-			`password` VARCHAR(64) NOT NULL DEFAULT '',
+			`password` VARCHAR(255) NOT NULL DEFAULT '',
 			`created` DATETIME NOT NULL,
 			PRIMARY KEY (`keyword`)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
 	);
 	nfcbooks_maybe_add_password_column();
+	nfcbooks_maybe_widen_password_column();
+	nfcbooks_maybe_encrypt_passwords_at_rest();
 }
 
 // Installs that already had this table before 0.3.0 won't have the
@@ -312,8 +324,172 @@ function nfcbooks_maybe_add_password_column() {
 	$ydb = yourls_get_db();
 	$existing = $ydb->fetchObjects( "SHOW COLUMNS FROM `" . NFCBOOKS_TABLE . "` LIKE 'password'" );
 	if ( empty( $existing ) ) {
-		$ydb->fetchAffected( "ALTER TABLE `" . NFCBOOKS_TABLE . "` ADD COLUMN `password` VARCHAR(64) NOT NULL DEFAULT '' AFTER `notes`" );
+		$ydb->fetchAffected( "ALTER TABLE `" . NFCBOOKS_TABLE . "` ADD COLUMN `password` VARCHAR(255) NOT NULL DEFAULT '' AFTER `notes`" );
 	}
+}
+
+function nfcbooks_password_key_configured() {
+	return defined( 'NFCBOOKS_PASSWORD_KEY' ) && NFCBOOKS_PASSWORD_KEY !== '';
+}
+
+function nfcbooks_password_encryption_key() {
+	if ( !nfcbooks_password_key_configured() ) {
+		return false;
+	}
+	$raw = (string) NFCBOOKS_PASSWORD_KEY;
+	if ( preg_match( '/^[0-9a-f]{64}$/i', $raw ) ) {
+		$key = hex2bin( $raw );
+		return ( $key !== false && strlen( $key ) === 32 ) ? $key : false;
+	}
+	$key = base64_decode( $raw, true );
+	if ( $key !== false && strlen( $key ) === 32 ) {
+		return $key;
+	}
+	return false;
+}
+
+function nfcbooks_password_encryption_available() {
+	return nfcbooks_password_encryption_key() !== false;
+}
+
+function nfcbooks_password_is_encrypted( $stored ) {
+	return is_string( $stored ) && strncmp( $stored, NFCBOOKS_PASSWORD_ENC_PREFIX, strlen( NFCBOOKS_PASSWORD_ENC_PREFIX ) ) === 0;
+}
+
+function nfcbooks_encrypt_password( $plain ) {
+	$plain = (string) $plain;
+	if ( $plain === '' || nfcbooks_password_is_encrypted( $plain ) ) {
+		return $plain;
+	}
+	$key = nfcbooks_password_encryption_key();
+	if ( $key === false ) {
+		return $plain;
+	}
+
+	if ( function_exists( 'sodium_crypto_secretbox' ) ) {
+		$nonce  = random_bytes( SODIUM_CRYPTO_SECRETBOX_NONCEBYTES );
+		$cipher = sodium_crypto_secretbox( $plain, $nonce, $key );
+		if ( $cipher === false ) {
+			return $plain;
+		}
+		return NFCBOOKS_PASSWORD_ENC_PREFIX . 'sbox:' . base64_encode( $nonce . $cipher );
+	}
+
+	if ( function_exists( 'openssl_encrypt' ) ) {
+		$iv     = random_bytes( 12 );
+		$tag    = '';
+		$cipher = openssl_encrypt( $plain, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag, '', 16 );
+		if ( $cipher === false || strlen( $tag ) !== 16 ) {
+			return $plain;
+		}
+		return NFCBOOKS_PASSWORD_ENC_PREFIX . 'gcm:' . base64_encode( $iv . $tag . $cipher );
+	}
+
+	return $plain;
+}
+
+function nfcbooks_decrypt_password( $stored ) {
+	$stored = (string) $stored;
+	if ( $stored === '' || !nfcbooks_password_is_encrypted( $stored ) ) {
+		return $stored;
+	}
+	$key = nfcbooks_password_encryption_key();
+	if ( $key === false ) {
+		return '';
+	}
+
+	$body = substr( $stored, strlen( NFCBOOKS_PASSWORD_ENC_PREFIX ) );
+	$sep  = strpos( $body, ':' );
+	if ( $sep === false ) {
+		return '';
+	}
+	$method = substr( $body, 0, $sep );
+	$raw    = base64_decode( substr( $body, $sep + 1 ), true );
+	if ( $raw === false ) {
+		return '';
+	}
+
+	if ( $method === 'sbox' && function_exists( 'sodium_crypto_secretbox_open' ) ) {
+		$nonce_len = SODIUM_CRYPTO_SECRETBOX_NONCEBYTES;
+		if ( strlen( $raw ) <= $nonce_len ) {
+			return '';
+		}
+		$nonce  = substr( $raw, 0, $nonce_len );
+		$cipher = substr( $raw, $nonce_len );
+		$plain  = sodium_crypto_secretbox_open( $cipher, $nonce, $key );
+		return ( $plain === false ) ? '' : $plain;
+	}
+
+	if ( $method === 'gcm' && function_exists( 'openssl_decrypt' ) ) {
+		if ( strlen( $raw ) <= 28 ) {
+			return '';
+		}
+		$iv     = substr( $raw, 0, 12 );
+		$tag    = substr( $raw, 12, 16 );
+		$cipher = substr( $raw, 28 );
+		$plain  = openssl_decrypt( $cipher, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag );
+		return ( $plain === false ) ? '' : $plain;
+	}
+
+	return '';
+}
+
+function nfcbooks_prepare_stored_password( $plain ) {
+	$plain = (string) $plain;
+	if ( $plain === '' ) {
+		return '';
+	}
+	if ( nfcbooks_password_is_encrypted( $plain ) ) {
+		return $plain;
+	}
+	return nfcbooks_encrypt_password( $plain );
+}
+
+function nfcbooks_password_for_api( $stored ) {
+	return nfcbooks_decrypt_password( $stored );
+}
+
+function nfcbooks_maybe_widen_password_column() {
+	$ydb = yourls_get_db();
+	$cols = $ydb->fetchObjects( "SHOW COLUMNS FROM `" . NFCBOOKS_TABLE . "` LIKE 'password'" );
+	if ( empty( $cols ) ) {
+		return;
+	}
+	$type = isset( $cols[0]->Type ) ? strtolower( (string) $cols[0]->Type ) : '';
+	if ( preg_match( '/varchar\((\d+)\)/', $type, $m ) && (int) $m[1] < 255 ) {
+		$ydb->fetchAffected( "ALTER TABLE `" . NFCBOOKS_TABLE . "` MODIFY COLUMN `password` VARCHAR(255) NOT NULL DEFAULT ''" );
+	}
+}
+
+function nfcbooks_maybe_encrypt_passwords_at_rest() {
+	if ( yourls_get_option( NFCBOOKS_PASSWORD_ENCRYPT_OPTION, '0' ) === '1' ) {
+		return;
+	}
+	if ( !nfcbooks_password_encryption_available() ) {
+		return;
+	}
+
+	$ydb  = yourls_get_db();
+	$rows = $ydb->fetchObjects( "SELECT keyword, password FROM `" . NFCBOOKS_TABLE . "` WHERE password != ''" );
+	foreach ( $rows as $row ) {
+		$stored = (string) $row->password;
+		if ( nfcbooks_password_is_encrypted( $stored ) ) {
+			continue;
+		}
+		$encrypted = nfcbooks_encrypt_password( $stored );
+		if ( $encrypted === $stored ) {
+			continue;
+		}
+		$ydb->fetchAffected(
+			"UPDATE `" . NFCBOOKS_TABLE . "` SET password = :password WHERE keyword = :keyword",
+			array(
+				'password' => $encrypted,
+				'keyword'  => $row->keyword,
+			)
+		);
+	}
+
+	yourls_update_option( NFCBOOKS_PASSWORD_ENCRYPT_OPTION, '1' );
 }
 
 /* -----------------------------------------------------------------------
@@ -515,6 +691,9 @@ function nfcbooks_admin_page() {
 	$library_title = nfcbooks_get_library_title();
 	?>
 	<h2>Library <small style="font-weight:normal;color:#888">v<?php echo yourls_esc_html( NFCBOOKS_VERSION ); ?></small></h2>
+	<?php if ( !nfcbooks_password_encryption_available() ) : ?>
+		<div class="notice" style="border-left-color:#dba617"><p><strong>NFC Library:</strong> Per-link NFC passwords are stored in plain text in the database because <code>NFCBOOKS_PASSWORD_KEY</code> is not set (or is not a valid 32-byte key) in your Yourls <code>user/config.php</code>. Define the constant to enable encryption at rest; until then the plugin keeps working as before. See the plugin README for how to generate a key.</p></div>
+	<?php endif; ?>
 	<p>Public listing page: <a href="<?php echo yourls_esc_attr( $site . '/library' ); ?>" target="_blank"><?php echo yourls_esc_html( $site . '/library' ); ?></a>
 	&mdash; the keyword <code>library</code> is reserved for this page, don't reuse it for a regular short link.</p>
 	<p style="color:#666;font-size:.9rem">Each book's short link (e.g. <code><?php echo yourls_esc_html( $site . '/isbn...' ); ?></code>) opens its own local page here &mdash; cover, title, author, your notes &mdash; with a "More info" link out to the Info URL. It doesn't redirect straight there.</p>

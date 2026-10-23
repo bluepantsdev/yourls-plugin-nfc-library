@@ -12,23 +12,23 @@
  * &debug=1 to the request to get diagnostic detail back in the response
  * (bootstrap path used, HTTP status from Open Library, any curl error,
  * a preview of the raw response, and any unexpected output that would
- * otherwise have broken the JSON).
+ * otherwise have broken the JSON). Debug detail is only included after
+ * the Yourls login session and nonce checks pass.
  *
  * Requires the Yourls server itself to have outbound HTTPS access to
  * openlibrary.org.
  */
 
-$nfcbooks_debug_requested = isset( $_GET['debug'] ) && $_GET['debug'] === '1';
+$nfcbooks_allow_debug = false;
 
 // A blank HTTP 200 usually means a PHP fatal error happened with
-// display_errors off. Turn errors on (and into the body) for debug
-// requests only, and install a shutdown handler as a safety net so even
+// display_errors off. Install a shutdown handler as a safety net so even
 // an uncaught fatal still produces a visible, non-empty response instead
-// of nothing.
+// of nothing. Diagnostic detail is only included once auth has passed.
 error_reporting( E_ALL );
-ini_set( 'display_errors', $nfcbooks_debug_requested ? '1' : '0' );
+ini_set( 'display_errors', '0' );
 
-register_shutdown_function( function () use ( $nfcbooks_debug_requested ) {
+register_shutdown_function( function () use ( &$nfcbooks_allow_debug ) {
 	$error = error_get_last();
 	if ( $error === null || !in_array( $error['type'], array( E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR ), true ) ) {
 		return;
@@ -40,9 +40,9 @@ register_shutdown_function( function () use ( $nfcbooks_debug_requested ) {
 		header( 'Pragma: no-cache' );
 		$payload = array(
 			'found' => false,
-			'error' => 'PHP fatal error in ajax.php — see debug for detail.' ,
+			'error' => 'PHP fatal error in ajax.php' . ( $nfcbooks_allow_debug ? ' — see debug for detail.' : '.' ),
 		);
-		if ( $nfcbooks_debug_requested ) {
+		if ( $nfcbooks_allow_debug ) {
 			$payload['debug'] = array( 'fatal_error' => $error );
 		}
 		echo json_encode( $payload );
@@ -54,10 +54,8 @@ $debug = array();
 
 try {
 	$bootstrap = dirname( __DIR__, 3 ) . '/includes/load-yourls.php';
-	$debug['bootstrap_path']   = $bootstrap;
-	$debug['bootstrap_exists'] = file_exists( $bootstrap );
 	if ( !file_exists( $bootstrap ) ) {
-		throw new Exception( 'Could not find the Yourls bootstrap file at: ' . $bootstrap . ' — this plugin folder may not be at the expected depth (user/plugins/nfc-library/) under your Yourls root.' );
+		throw new Exception( 'Could not find the Yourls bootstrap file — this plugin folder may not be at the expected depth (user/plugins/nfc-library/) under your Yourls root.' );
 	}
 	require_once $bootstrap;
 
@@ -68,6 +66,13 @@ try {
 	// Keep in sync with NFCBOOKS_NONCE in plugin.php.
 	if ( empty( $_GET['nonce'] ) || !yourls_verify_nonce( 'nfcbooks-manage', $_GET['nonce'], false ) ) {
 		throw new Exception( 'Bad or missing security nonce — reload the Library admin page and try again.' );
+	}
+
+	if ( isset( $_GET['debug'] ) && $_GET['debug'] === '1' ) {
+		$nfcbooks_allow_debug = true;
+		ini_set( 'display_errors', '1' );
+		$debug['bootstrap_path']   = $bootstrap;
+		$debug['bootstrap_exists'] = true;
 	}
 
 	$title  = isset( $_GET['title'] ) ? trim( $_GET['title'] ) : '';
@@ -90,8 +95,7 @@ try {
 
 $unexpected_output = ob_get_clean();
 
-$want_debug = isset( $_GET['debug'] ) && $_GET['debug'] === '1';
-if ( $want_debug ) {
+if ( $nfcbooks_allow_debug ) {
 	if ( $unexpected_output !== '' ) {
 		$debug['unexpected_output'] = substr( $unexpected_output, 0, 800 );
 	}
