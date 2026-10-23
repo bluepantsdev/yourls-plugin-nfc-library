@@ -2,7 +2,7 @@
 
 Adds a public `/library` page and an admin **Library** management page to a Yourls install. Built for the NFC Tags iOS app project.
 
-Current version: **0.5.1** (shown next to the "Library" heading on the admin page).
+Current version: **0.5.2** (shown next to the "Library" heading on the admin page).
 
 ## What it does
 
@@ -14,7 +14,7 @@ Current version: **0.5.1** (shown next to the "Library" heading on the admin pag
   - **Random** — fills the keyword with a random short slug, no lookup/network needed.
   - **Custom** — type your own keyword by hand, as before.
   - A **🐛 Debug lookup** button appears next to Smart Generate — it runs the same lookup but shows the raw diagnostic response (bootstrap path check, HTTP status/error from Open Library, response preview) in a box below, useful when Smart Generate reports a problem.
-  - `&debug=1` also turns PHP error display on for that one request and installs a shutdown handler, so a PHP fatal error (the classic cause of a silent "HTTP 200, empty body") shows up as visible text instead of nothing. Because a fatal can happen before the login check runs, debug mode can reveal a server file path in the error text to whoever requests it — fine for troubleshooting, just don't leave it as something you link to publicly.
+  - `&debug=1` also turns PHP error display on for that one request and installs a shutdown handler, so a PHP fatal error (the classic cause of a silent "HTTP 200, empty body") shows up as visible text instead of nothing. Debug detail (bootstrap path, HTTP diagnostics, fatal errors) is only returned after you are logged into the Yourls admin and the request includes a valid nonce.
 - Book metadata (title, author, cover URL, notes) lives in its own table, `yourls_book_tags`, created automatically on first load — no changes to Yourls' own tables.
 - The keyword `library` is reserved by this plugin for the public listing page — don't create a separate short link with that exact keyword.
 - After adding a book, the success message includes a **clickable link** to the new short URL (e.g. `Added "Dune" as http://sund.link/isbn9780441007493`), opening in a new tab.
@@ -33,8 +33,8 @@ Stock Yourls' API only supports creating links (`shorturl`) and reading them (`s
 
 - `action=nfclibrary_edit` -- params `keyword` (required), `url` (required), `title` (optional), plus optional book metadata: `author`, `cover_url`, `notes`, `password`. Updates the link's destination/title, and upserts whichever optional fields are present in the request -- an omitted field is left untouched (not blanked out), so partial updates are safe.
 - `action=nfclibrary_delete` -- params `keyword` (required). Deletes the link and its metadata row.
-- `action=nfclibrary_meta` -- no params. Bulk-returns this plugin's per-keyword metadata as `{"meta": {"<keyword>": {"author", "cover_url", "notes", "password"}, ...}}`, since none of that lives in Yourls' own link data. The app calls this once per link-list refresh (not once per link) and merges it into the native `stats` response.
-- `action=nfclibrary_status` -- no params. Returns `{"version": "0.5.1", ...}` so the app's Settings > NFC Library Plugin screen can confirm this plugin is installed/active and check its version, without that check depending on any of the other actions actually succeeding.
+- `action=nfclibrary_meta` -- no params. Bulk-returns this plugin's per-keyword metadata as `{"meta": {"<keyword>": {"author", "cover_url", "notes", "password", "has_password"}, ...}}`, since none of that lives in Yourls' own link data. The `password` field is the decrypted NFC tag lock password (empty string when none is set). Passwords are encrypted at rest in the database when `NFCBOOKS_PASSWORD_KEY` is configured; this action still requires the usual API signature. The app calls this once per link-list refresh (not once per link) and merges it into the native `stats` response.
+- `action=nfclibrary_status` -- no params. Returns `{"version": "0.5.2", ...}` so the app's Settings > NFC Library Plugin screen can confirm this plugin is installed/active and check its version, without that check depending on any of the other actions actually succeeding.
 
 All four return the usual `{"status": "success"|"fail", ...}` shape (`nfclibrary_meta` also includes `meta`, `nfclibrary_status` also includes `version`). Creating links from the app still uses Yourls' native `action=shorturl`, followed by an `nfclibrary_edit` call to attach any metadata the app collected (author/cover/notes/password) -- native `shorturl` has no way to carry those itself. Listing links uses `action=stats` merged with `action=nfclibrary_meta`.
 
@@ -48,6 +48,24 @@ Alongside the existing title/author-based Smart Generate lookup, the admin page'
 2. In Yourls admin, go to **Plugins** and click **Activate** next to "NFC Library".
 3. Visit `https://sund.link/library` to confirm the public page loads (it'll say "No books tagged yet" until you add one).
 4. Add a book from the admin page and confirm the short link works.
+
+## Per-link NFC passwords (encryption at rest)
+
+The companion iOS app stores each tag's hardware lock password on the server so you can recover it on another device. Those values live in the `book_tags.password` column. With **v0.5.2+**, the plugin encrypts them at rest when you define a key in Yourls config (libsodium `secretbox` when available, otherwise OpenSSL AES-256-GCM). The `nfclibrary_meta` API still returns the decrypted `password` string to authenticated API clients — same shape as before.
+
+**Generate a 32-byte key** (64 hex characters):
+
+```bash
+php -r "echo bin2hex(random_bytes(32));"
+```
+
+**Add to `user/config.php`** (with your Yourls site URL and other settings):
+
+```php
+define( 'NFCBOOKS_PASSWORD_KEY', 'paste64hexcharactershere' );
+```
+
+You can also use a standard base64 encoding of exactly 32 raw bytes. If the constant is missing or invalid, the plugin **does not** encrypt or alter existing values and shows a notice on the admin **Library** page; behavior stays compatible with older installs until you add a valid key. On first load after a valid key is present, any legacy plain-text passwords in the table are encrypted once automatically.
 
 ## Notes / things to revisit
 
